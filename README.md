@@ -16,13 +16,23 @@
 
 ## Install
 
-Requires macOS and Python 3.10+.
+**Download** [interpretability-0.1.0-arm64.dmg](https://github.com/xinhaoc/interpretability/releases/download/v0.1.0/interpretability-0.1.0-arm64.dmg) (Apple Silicon Mac, macOS 13+). Nothing else to install.
+
+1. Open the DMG and drag **interpretability** into Applications.
+2. The app is not notarized by Apple, so macOS blocks the first launch. Open **System Settings → Privacy & Security**, scroll down and click **Open Anyway**. Or run once in Terminal:
+   ```bash
+   xattr -dr com.apple.quarantine /Applications/interpretability.app
+   ```
+3. Choose a model with ⚙ (see below).
+
+**From source** (needs Xcode Command Line Tools and Python 3.10+):
 
 ```bash
 git clone https://github.com/xinhaoc/interpretability.git
 cd interpretability
 pip install -r requirements.txt
-./macos/build.sh    # builds and installs interpretability.app
+./macos/build.sh      # builds and installs interpretability.app using your Python
+./macos/package.sh    # or: a self-contained app and DMG, like the download
 ```
 
 To run without the app, use `python3 app.py` and open http://127.0.0.1:8765.

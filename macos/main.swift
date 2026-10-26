@@ -23,8 +23,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
 
     // The server code ships inside the bundle (Contents/Resources/app); a plist key can point elsewhere for development.
     let projectDir = plist("InterpretabilityProjectDir") ?? (Bundle.main.resourcePath ?? "") + "/app"
-    let python = plist("InterpretabilityPython") ?? "/usr/bin/python3"
-    let searchPath = plist("InterpretabilityPATH") ?? "/usr/local/bin:/usr/bin:/bin"
+    // Python: the one recorded at build time (a local build), else the copy shipped in the bundle (a release).
+    let python: String = {
+        if let p = plist("InterpretabilityPython"), FileManager.default.isExecutableFile(atPath: p) { return p }
+        let bundled = (Bundle.main.resourcePath ?? "") + "/python/bin/python3"
+        return FileManager.default.isExecutableFile(atPath: bundled) ? bundled : "/usr/bin/python3"
+    }()
+    // PATH, so the server can find `claude` / `codex`: apps opened from Finder don't get the
+    // shell's PATH, so ask the user's login shell once, and add the usual install places.
+    lazy var searchPath: String = {
+        if let p = plist("InterpretabilityPATH") { return p }
+        let home = NSHomeDirectory()
+        var parts = [home + "/.local/bin", "/opt/homebrew/bin", "/usr/local/bin", home + "/.npm-global/bin", home + "/.bun/bin"]
+        let sh = Process()
+        sh.executableURL = URL(fileURLWithPath: ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh")
+        sh.arguments = ["-ilc", "printf '%s' \"$PATH\""]
+        let out = Pipe()
+        sh.standardOutput = out
+        sh.standardError = FileHandle.nullDevice
+        sh.standardInput = FileHandle.nullDevice
+        if (try? sh.run()) != nil {
+            let deadline = Date().addingTimeInterval(3)
+            while sh.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.05) }
+            if sh.isRunning { sh.terminate() }
+            let text = String(data: out.fileHandleForReading.availableData, encoding: .utf8) ?? ""
+            if let last = text.split(separator: "\n").last { parts += last.split(separator: ":").map(String.init) }
+        }
+        parts += ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+        var seen = Set<String>()
+        return parts.filter { !$0.isEmpty && seen.insert($0).inserted }.joined(separator: ":")
+    }()
     let logURL = URL(fileURLWithPath: NSHomeDirectory() + "/Interpretability/server.log")
 
     // MARK: launch / quit
@@ -104,6 +132,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         env["PYTHONUNBUFFERED"] = "1"
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         env["INTERPRETABILITY_LIFELINE"] = "1"
+        env["PYTHONNOUSERSITE"] = "1"  // never mix in packages from the user's own Python
         p.environment = env
         let pipe = Pipe()
         p.standardInput = pipe
