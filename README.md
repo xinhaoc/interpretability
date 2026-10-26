@@ -78,3 +78,7 @@ For a local model with a small context, set the character limit. Papers that do 
 ## Third-party code
 
 Bundled in `static/vendor/` so the app works offline: [pdf.js](https://github.com/mozilla/pdf.js) (Apache-2.0), [KaTeX](https://github.com/KaTeX/KaTeX) (MIT), [marked](https://github.com/markedjs/marked) (MIT), [DOMPurify](https://github.com/cure53/DOMPurify) (Apache-2.0 / MPL-2.0), [Mind Elixir](https://github.com/SSShooter/mind-elixir-core) (MIT). PDF text extraction uses [PyMuPDF](https://github.com/pymupdf/PyMuPDF) (AGPL-3.0), installed from PyPI.
+
+## License
+
+[AGPL-3.0](LICENSE). The PDF text extraction library, PyMuPDF, is AGPL-3.0 as well.
