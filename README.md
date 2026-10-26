@@ -1,43 +1,43 @@
 # interpretability
 
-**读懂每一篇论文。** 一个在本地运行的读论文工具：选中任意一行、公式或图表，让 AI 讲给你听。
+**Read every line. Understand every step.** A local app for reading papers with AI: select any line, equation or figure and have it explained.
 
 ![interpretability](docs/preview.gif)
 
-▶ [观看完整宣传片（50 秒）](https://github.com/xinhaoc/interpretability/releases/download/v0.1.0/interpretability-promo.mp4)
+▶ [Watch the full promo (50 s)](https://github.com/xinhaoc/interpretability/releases/download/v0.1.0/interpretability-promo.mp4)
 
-## 能做什么
+## Features
 
-- **选中就问**：选中文字或框选公式、图表，一键「解释 / 推导 / 通俗讲 / 联系全文 / 挑毛病」，也可以自己提问、接着追问。
-- **读一遍就记住**：导入后模型通读全文，记下笔记、符号表和每张图表。之后的提问都用这份记忆，换模型也不用重读。
-- **引用可核对**：回答里引用的原文会去 PDF 里逐句核对，找到的打 ✓，找不到的打 ⚠。Figure、Eq.、§、[17] 都能悬停预览、点击跳转。
-- **推导图**：一键生成可编辑的思维导图，从问题、想法、公式推导一直到实验证据，每个节点都标出原文出处。
-- **你的笔记**：划线、批注、自由笔记也会存进记忆，模型回答时能看到。
+- **Select and ask**: select text, or draw a box around an equation or figure, then pick Explain / Derive / Simplify / Connect / Critique, or type your own question and keep following up.
+- **Read once, remember**: after import, the model reads the whole paper once and writes notes, a notation table and a description of every figure. Every later question uses this memory, so switching models never means re-reading.
+- **Checked quotes**: quotes in answers are matched against the PDF and marked ✓ when found or ⚠ when not. Figure, Eq., §, [17] and page references show a preview on hover and jump there on click.
+- **Derivation maps**: generate an editable mind map of the paper's argument, from the problem and key idea through each equation to the evidence. Every node shows where it comes from.
+- **Your notes**: highlights, margin notes and free-form notes go into the memory too, so answers build on them.
 
-## 安装
+## Install
 
-需要 macOS 和 Python 3.10+。
+Requires macOS and Python 3.10+.
 
 ```bash
 git clone https://github.com/xinhaoc/interpretability.git
 cd interpretability
 pip install -r requirements.txt
-./macos/build.sh    # 打包并安装 interpretability.app
+./macos/build.sh    # builds and installs interpretability.app
 ```
 
-不想装 App 的话，运行 `python3 app.py`，然后在浏览器里打开 http://127.0.0.1:8765。
+To run without the app, use `python3 app.py` and open http://127.0.0.1:8765.
 
-## 接入模型
+## Models
 
-在右上角 ⚙ 里切换：
+Switch with ⚙ in the top-right corner:
 
-- **Claude Code**（默认）：用你的 Claude 订阅，先在终端运行一次 `claude` 登录。
-- **Anthropic API**：填 API key。
-- **Codex CLI**：用你的 ChatGPT 订阅。
-- **本地模型**：Ollama、LM Studio 等任何 OpenAI 兼容接口。
+- **Claude Code** (default): uses your Claude subscription. Run `claude` once in a terminal to log in.
+- **Anthropic API**: needs an API key.
+- **Codex CLI**: uses your ChatGPT subscription.
+- **Local models**: Ollama, LM Studio or any OpenAI-compatible endpoint.
 
-论文、笔记和记忆都存在本地的 `~/Interpretability/`。
+Papers, notes and memory stay on your machine in `~/Interpretability/`.
 
 ## License
 
-[AGPL-3.0](LICENSE)。内置了 pdf.js、KaTeX、marked、DOMPurify、Mind Elixir，PDF 文字提取用的是 PyMuPDF。
+[AGPL-3.0](LICENSE). Bundles pdf.js, KaTeX, marked, DOMPurify and Mind Elixir; PDF text extraction uses PyMuPDF.
