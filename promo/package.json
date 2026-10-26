@@ -1,0 +1,20 @@
+{
+  "name": "interpretability-promo",
+  "private": true,
+  "scripts": {
+    "music": "python3 make_music.py public/music.wav",
+    "studio": "remotion studio src/index.ts",
+    "render": "remotion render src/index.ts Promo out/interpretability-promo.mp4 --codec h264 --crf 16"
+  },
+  "dependencies": {
+    "@remotion/cli": "4.0.533",
+    "katex": "0.16.11",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "remotion": "4.0.533"
+  },
+  "devDependencies": {
+    "@types/react": "18.3.12",
+    "typescript": "5.6.3"
+  }
+}

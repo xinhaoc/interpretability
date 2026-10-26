@@ -6,3 +6,7 @@ __pycache__/
 .DS_Store
 # local tool config
 .claude/
+
+# promo video build
+promo/node_modules/
+promo/out/
