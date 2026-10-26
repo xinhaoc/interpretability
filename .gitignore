@@ -1,0 +1,8 @@
+# build output and caches
+dist/
+build/
+__pycache__/
+*.pyc
+.DS_Store
+# local tool config
+.claude/

@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>interpretability</title>
+<link rel="stylesheet" href="/static/vendor/katex/katex.min.css">
+<link rel="stylesheet" href="/static/vendor/mind-elixir/MindElixir.css">
+<link rel="stylesheet" href="/static/style.css">
+<script src="/static/vendor/marked.umd.js"></script>
+<script src="/static/vendor/purify.min.js"></script>
+<script src="/static/vendor/katex/katex.min.js"></script>
+</head>
+<body>
+<header id="topbar">
+  <button id="toggle-lib" class="icon" title="论文库">☰</button>
+  <div id="paper-title" title="双击改标题">interpretability</div>
+  <div class="spacer"></div>
+  <div id="viewer-tools" hidden>
+    <button id="page-ind" class="ghost" title="跳到某一页">–</button>
+    <button id="zoom-out" class="icon" title="缩小">−</button>
+    <span id="zoom-ind">100%</span>
+    <button id="zoom-in" class="icon" title="放大">+</button>
+    <button id="zoom-fit" title="适应宽度">适宽</button>
+    <button id="region-btn" title="框选公式/图/表（快捷键 R，或按住 Option 拖动）">▭ 框选</button>
+    <button id="map-btn" title="这篇论文是怎么一步步推出来的：可编辑的推导图">🧭 推导图</button>
+  </div>
+  <div id="mode-switch" title="记忆模式：每次只发这篇论文的记忆（通读笔记、图表描述、问答沉淀）和当前页，细节由模型用工具去查原文。快、省，换模型也一样。&#10;全文模式：每次都附上整篇原文，细节最稳，但更费 token。">
+    <span class="lbl">上下文</span><button data-mode="memory">📒 记忆</button><button data-mode="full">📄 全文</button>
+  </div>
+  <button id="backend-btn" title="模型设置">⚙ <span id="backend-name"></span></button>
+</header>
+
+<main>
+  <aside id="library">
+    <div class="lib-import">
+      <label class="btn primary">导入 PDF<input id="file-input" type="file" accept="application/pdf" multiple hidden></label>
+      <form id="url-form"><input id="url-input" placeholder="arXiv 编号 / PDF 链接"><button>导入</button></form>
+      <div class="hint">也可以把 PDF 拖进窗口</div>
+    </div>
+    <ul id="paper-list"></ul>
+  </aside>
+
+  <section id="viewer">
+    <div id="empty-state">
+      <h1>interpretability</h1>
+      <p class="tagline">读懂每一篇论文</p>
+      <p>导入一篇论文。AI 会先通读全文写一份笔记，之后你读到哪里不懂，就选中那段文字、或者框选公式和图，让它解释。</p>
+      <ol>
+        <li>选中文字 → 弹出按钮：解释 / 推导 / 通俗讲 / 联系全文 / 挑毛病，或者直接打字提问</li>
+        <li>按 <kbd>R</kbd> 或按住 <kbd>Option</kbd> 拖一个框 → 截图发给模型（适合公式、图、表）</li>
+        <li>每个问题是一个线程，可以继续追问；页面上的高亮可以点回去</li>
+      </ol>
+    </div>
+    <div id="region-hint" hidden>拖一个框选中公式 / 图 / 表 · Esc 取消</div>
+    <div id="back-wrap"><button id="back-btn" hidden title="回到跳转前的位置（Alt+← 或 Backspace）">↩ 回到刚才读的地方</button></div>
+    <div id="pages"></div>
+  </section>
+
+  <div id="splitter"></div>
+
+  <aside id="panel">
+    <nav id="tabs">
+      <button data-tab="qa" class="active">问答 <span id="qa-count"></span></button>
+      <button data-tab="mine">笔记 <span id="mine-count"></span></button>
+      <button data-tab="notes">记忆 <span id="notes-status"></span></button>
+    </nav>
+    <div id="tab-qa" class="tab active">
+      <form id="global-ask"><textarea rows="1" placeholder="问整篇论文的问题…（Enter 发送，Shift+Enter 换行）"></textarea></form>
+      <div id="threads"></div>
+    </div>
+    <div id="tab-mine" class="tab"><div id="mine"></div></div>
+    <div id="tab-notes" class="tab">
+      <div id="notes-bar"></div>
+      <div id="memory"></div>
+    </div>
+  </aside>
+</main>
+
+<section id="mm-view" hidden>
+  <div class="mm-bar">
+    <b>推导图</b><span id="mm-status" class="hint"></span>
+    <span class="spacer"></span>
+    <button id="mm-locate" title="跳到这个节点在论文里的出处">↗ 定位原文</button>
+    <button id="mm-expand" title="让 AI 在这个节点下补充细节">＋ 展开</button>
+    <button id="mm-ask" title="就这个节点开一条问答">💬 就此提问</button>
+    <select id="mm-deps" title="跨分支的依赖关系（虚线）">
+      <option value="sel">依赖线：只看选中的</option><option value="all">依赖线：全部</option><option value="off">依赖线：关</option>
+    </select>
+    <select id="mm-export"><option value="">导出…</option><option value="png">PNG 图片</option><option value="md">Markdown</option><option value="opml">OPML（XMind / 幕布）</option></select>
+    <button id="mm-gen" class="primary">✨ 生成推导图</button>
+    <button id="mm-close" title="回到论文（Esc）">✕</button>
+  </div>
+  <div id="mm-empty" hidden>
+    <h2>这篇论文是怎么一步步推出来的？</h2>
+    <p>生成一张可编辑的推导图：从问题出发，经过关键想法、方法里的每一步公式，到实验证据和局限。每个节点都标出原文出处，图表节点直接显示原图，引用的原文会自动核对。</p>
+    <p class="hint">双击节点改字，Tab 加子节点，拖动调整结构，右键有更多操作。你改过的导图会存进这篇论文的记忆。</p>
+    <button id="mm-empty-gen" class="primary">✨ 生成推导图</button>
+  </div>
+  <div id="mm-canvas"></div>
+</section>
+
+<div id="sel-pop" hidden>
+  <div class="pop-head"><span id="pop-what"></span><span id="pop-target"></span></div>
+  <div class="acts">
+    <button data-act="explain">解释</button>
+    <button data-act="math">推导</button>
+    <button data-act="simple">通俗讲</button>
+    <button data-act="connect">联系全文</button>
+    <button data-act="critique">挑毛病</button>
+    <button id="note-btn" class="note-btn" title="划线并写下自己的批注">✎ 记笔记</button>
+  </div>
+  <div id="note-editor"></div>
+  <form><input placeholder="输入问题，Enter 发送（空着按 Enter = 解释）"></form>
+</div>
+
+<dialog id="settings">
+  <form method="dialog" id="settings-form">
+    <h2>模型设置</h2>
+    <div id="backend-choices"></div>
+    <div id="backend-fields"></div>
+    <hr>
+    <label class="row">回答语言 <select name="language"><option>中文</option><option>English</option></select></label>
+    <label class="row"><input type="checkbox" name="auto_digest"> 导入后自动通读</label>
+    <label class="row"><input type="checkbox" name="attach_image_for_text"> 选中文字时也附上那块区域的截图（公式更准）</label>
+    <label class="row"><input type="checkbox" name="distill_qa"> 问答结束后把有用的结论沉淀进记忆</label>
+    <div class="dialog-actions"><button value="cancel" formnovalidate>取消</button><button value="save" class="primary">保存</button></div>
+  </form>
+</dialog>
+
+<div id="toast" hidden></div>
+<div id="ref-preview" hidden></div>
+<script type="module" src="/static/app.js"></script>
+</body>
+</html>
