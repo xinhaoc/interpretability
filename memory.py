@@ -168,7 +168,8 @@ def render(paper_dir) -> str:
             box = f.get("bbox")
             where = f"p.{f['page']}" + (f", box x0={box[0]:.2f} y0={box[1]:.2f} x1={box[2]:.2f} y1={box[3]:.2f}" if box else "")
             desc = f.get("description") or "(not described yet)"
-            lines.append(f"### {f['label']} [{where}]\nCaption: {f.get('caption', '')}\n{desc}")
+            what = "Text below it" if f.get("uncaptioned") else "Caption"
+            lines.append(f"### {f['label']} [{where}]\n{what}: {f.get('caption', '')}\n{desc}")
         parts.append("<figures_and_tables>\n" + "\n\n".join(lines) + "\n</figures_and_tables>")
     return "\n\n".join(parts)
 
@@ -254,6 +255,64 @@ Use exactly this format, one block per item, nothing else:
 
 === Table 2 | page 8 | bbox 0.18 0.10 0.85 0.37
 <description>"""
+
+FIGURE_CROP_PROMPT = """Each image above is a figure or table cropped from the paper; it has no numbered caption, so it is named by its page. For EACH item, write a description that lets someone who cannot see it understand it:
+- what kind of plot/diagram/table/visualisation it is, and what its axes / columns / parts mean;
+- the key content: trends, the important numbers, components and how they connect;
+- the takeaway, and what point of the paper it supports.
+3-8 sentences each, in {language}. Read numbers off the image; do not invent values you cannot read. If an item is only decoration (a logo, an icon, a border, an empty or unreadable box), write SKIP as its description.
+
+Use exactly this format, one block per item, nothing else:
+
+=== 图 p.3-1 | page 3 | bbox 0 0 1 1
+<description>"""
+
+
+def find_figure_regions(pdf_path, skip_pages=(), max_regions=60):
+    """Figures without a numbered caption: embedded images and clusters of vector drawings.
+
+    Returns [(page_index, label, text_just_below, bbox_fraction)].
+    """
+    import fitz
+    doc = fitz.open(pdf_path)
+    out = []
+    for pno, page in enumerate(doc):
+        if pno in skip_pages:
+            continue
+        W, H = page.rect.width, page.rect.height
+        area = W * H
+        rects = []
+        for img in page.get_images(full=True):
+            try:
+                rects += [fitz.Rect(r) for r in page.get_image_rects(img[0]) if r.get_area() / area > 0.03]
+            except Exception:
+                pass
+        try:
+            rects += [fitz.Rect(r) for r in page.cluster_drawings() if r.get_area() / area > 0.05]
+        except Exception:
+            pass
+        # Merge pieces that touch (a figure is often several images or drawings side by side).
+        merged = []
+        for r in sorted((r & page.rect for r in rects), key=lambda r: (r.y0, r.x0)):
+            if r.is_empty:
+                continue
+            for m in merged:
+                if (m + (-8, -8, 8, 8)).intersects(r):
+                    m |= r
+                    break
+            else:
+                merged.append(fitz.Rect(r))
+        k = 0
+        for r in merged:
+            if r.get_area() / area > 0.92:  # a full-page background, not a figure
+                continue
+            k += 1
+            below = page.get_text("text", clip=fitz.Rect(r.x0, r.y1, r.x1, min(H, r.y1 + 60))).strip()
+            shown = r * page.rotation_matrix
+            out.append((pno, f"图 p.{pno + 1}-{k}", re.sub(r"\s+", " ", below)[:300],
+                        [max(0.0, shown.x0 / W), max(0.0, shown.y0 / H), min(1.0, shown.x1 / W), min(1.0, shown.y1 / H)]))
+    return out[:max_regions]
+
 
 BLOCK_RE = re.compile(r"^===\s*(.+?)\s*\|\s*page\s*(\d+)\s*\|\s*bbox\s*([\d.\s,]+?)\s*$", re.M | re.I)
 

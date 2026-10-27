@@ -1053,7 +1053,15 @@ function renderMemoryBar() {
   if (st === "running") bar.append(h("span", { class: "typing" }, state.digestPhase || "正在通读…"));
   else if (st === "none") bar.append(h("span", {}, "还没有通读。通读后，笔记和图表描述会存成这篇论文的记忆，之后换哪个模型提问都直接用它，不用重读。"), all);
   else if (st === "error") bar.append(h("span", { class: "warn" }, `通读失败：${state.digestError || ""}`), all);
-  else bar.append(h("span", {}, "这篇论文的记忆存在本地，所有模型共用。"), all, figs);
+  else {
+    // Say plainly that a memory written by one model is used as-is by the one selected now.
+    const author = state.memory.info?.notes?.backend;
+    const now = state.settings.backend;
+    const note = author && author !== now
+      ? `这份记忆是 ${BACKEND_INFO[author]?.[0] || author} 写的；现在用 ${BACKEND_INFO[now]?.[0] || now} 提问也直接用它，不用重读。`
+      : "这篇论文的记忆存在本地，所有模型共用。";
+    bar.append(h("span", {}, note), all, figs);
+  }
 }
 
 function renderMemory() {
@@ -1076,7 +1084,7 @@ function renderMemory() {
     figList.append(h("div", { class: "fig" },
       h("div", { class: "fig-head", title: "跳到这张图", onclick: () => scrollToSelection({ page: f.page - 1, bbox: f.bbox || [0, 0, 1, 0.3] }) },
         h("b", {}, f.label), h("span", { class: "pg" }, `p.${f.page}`)),
-      h("div", { class: "fig-cap" }, f.caption || ""), desc));
+      h("div", { class: "fig-cap" }, f.uncaptioned ? (f.caption ? `图下文字：${f.caption}` : "（无图注）") : f.caption || ""), desc));
   }
   if (!(mem.figures || []).length) figList.append(h("div", { class: "hint" }, state.digestStatus === "running" ? "通读完笔记后会看图表…" : "没有记录图表"));
   const figSub = [sourceText(info.figures), info.figures?.note].filter(Boolean).join(" · ");

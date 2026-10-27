@@ -461,29 +461,59 @@ async def read_notes(d, meta, pages, settings, job):
 
 
 async def read_figures(d, pages, settings, job):
-    caps = memory.find_captions(pages)
     name = settings["backend"]
     cfg = settings["backends"].get(name, {})
+    # Figures with a numbered caption ("Figure 3:"), found in the text ...
+    caps = memory.find_captions(pages)
     figs = [{"label": label, "kind": label.split()[0].lower(), "page": i + 1, "caption": cap,
              "bbox": None, "description": ""} for i, label, cap in caps]
-    if not caps:
+    # ... and, on pages without such captions, images and drawings found on the page itself.
+    regions = await asyncio.to_thread(memory.find_figure_regions, d / "paper.pdf", {f["page"] - 1 for f in figs})
+    extra = [{"label": label, "kind": "figure", "page": p + 1, "caption": near, "bbox": box, "description": "",
+              "uncaptioned": True} for p, label, near, box in regions]
+    if not figs and not extra:
         memory.save_figures(d, [], source_of(settings))
         return
     if not can_see(name, cfg):
-        memory.save_figures(d, figs, {**source_of(settings), "note": "当前模型看不了图，只记录了图注"})
+        memory.save_figures(d, figs + extra, {**source_of(settings), "note": "当前模型看不了图，只记录了位置和图注"})
         return
     # Start from what an earlier pass found, so a failed batch never erases good descriptions.
     old = {f["label"]: f for f in memory.figures(d)}
-    for f in figs:
+    for f in figs + extra:
         if f["label"] in old:
             f["description"] = old[f["label"]].get("description", "")
-            f["bbox"] = old[f["label"]].get("bbox")
-    by_label = {f["label"]: f for f in figs}
-    page_nums = sorted({f["page"] for f in figs})
-    batches = [page_nums[i:i + 4] for i in range(0, len(page_nums), 4)]
+            f["bbox"] = f["bbox"] or old[f["label"]].get("bbox")
+    by_label = {f["label"]: f for f in figs + extra}
+    skipped = set()
     backend = BACKENDS[name]
-    for k, batch in enumerate(batches):
-        await job.push(phase=f"正在看图表（{k + 1}/{len(batches)}，第 {', '.join(map(str, batch))} 页）…")
+    system = "You are a careful research assistant who describes figures and tables precisely."
+
+    def apply(out, keep_bbox):
+        for item in memory.parse_figure_blocks(out):
+            label = re.sub(r"^Fig(?:\.|ure)?\s*(?=\d)", "Figure ", item["label"], flags=re.I)
+            f = by_label.get(label)
+            if not f:
+                continue
+            desc = item["description"]
+            if desc.upper().startswith("SKIP"):
+                skipped.add(label)
+            elif desc and not desc.upper().startswith("NOT FOUND"):
+                f["description"] = desc
+            if item["bbox"] and not keep_bbox:
+                f["bbox"] = [max(0.0, min(1.0, v)) for v in item["bbox"]]
+
+    def save():
+        memory.save_figures(d, [f for f in figs + extra if f["label"] not in skipped], source_of(settings))
+
+    # Captioned figures: whole pages, 4 at a time; the model also finds each figure's box.
+    page_nums = sorted({f["page"] for f in figs})
+    page_batches = [page_nums[i:i + 4] for i in range(0, len(page_nums), 4)]
+    crop_batches = [extra[i:i + 6] for i in range(0, len(extra), 6)]
+    total = len(page_batches) + len(crop_batches)
+    step = 0
+    for batch in page_batches:
+        step += 1
+        await job.push(phase=f"正在看图表（{step}/{total}，第 {', '.join(map(str, batch))} 页）…")
         content = []
         for pn in batch:
             png = await asyncio.to_thread(paper_tools.view_page, d, pn)
@@ -491,18 +521,23 @@ async def read_figures(d, pages, settings, job):
                         {"type": "image", "media_type": "image/png", "data": base64.b64encode(png).decode()}]
         items = "\n".join(f"- {f['label']} (page {f['page']}): {f['caption'][:200]}" for f in figs if f["page"] in batch)
         content.append({"type": "text", "text": memory.FIGURE_PROMPT.format(items=items, language=settings["language"])})
-        out = await collect(backend, "You are a careful research assistant who describes figures and tables precisely.",
-                            [{"role": "user", "content": content}], cfg)
-        for item in memory.parse_figure_blocks(out):
-            label = re.sub(r"^Fig(?:\.|ure)?\s*(?=\d)", "Figure ", item["label"], flags=re.I)
-            f = by_label.get(label)
-            if not f:
-                continue
-            if item["description"] and not item["description"].upper().startswith("NOT FOUND"):
-                f["description"] = item["description"]
-            if item["bbox"]:
-                f["bbox"] = [max(0.0, min(1.0, v)) for v in item["bbox"]]
-        memory.save_figures(d, figs, source_of(settings))  # save after each batch
+        apply(await collect(backend, system, [{"role": "user", "content": content}], cfg), keep_bbox=False)
+        save()  # after each batch
+    # Figures without captions: crop each one, 6 per request; their boxes are already known.
+    for batch in crop_batches:
+        step += 1
+        await job.push(phase=f"正在看图表（{step}/{total}，无编号的图）…")
+        content = []
+        for f in batch:
+            b = f["bbox"]
+            png = await asyncio.to_thread(paper_tools.view_page, d, f["page"], b[0] - 0.01, b[1] - 0.01, b[2] + 0.01, b[3] + 0.01)
+            near = f" Text just below it: {f['caption'][:200]}" if f["caption"] else ""
+            content += [{"type": "text", "text": f"Item {f['label']} (page {f['page']}).{near}"},
+                        {"type": "image", "media_type": "image/png", "data": base64.b64encode(png).decode()}]
+        content.append({"type": "text", "text": memory.FIGURE_CROP_PROMPT.format(language=settings["language"])})
+        apply(await collect(backend, system, [{"role": "user", "content": content}], cfg), keep_bbox=True)
+        save()
+    save()
 
 
 async def run_digest(pid, job: Job, parts="all"):
