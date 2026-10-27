@@ -132,7 +132,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         env["PYTHONUNBUFFERED"] = "1"
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         env["INTERPRETABILITY_LIFELINE"] = "1"
-        env["PYTHONNOUSERSITE"] = "1"  // never mix in packages from the user's own Python
+        // The bundled Python must not mix in the user's own packages; a local build uses them.
+        if python.hasPrefix(Bundle.main.resourcePath ?? "\u{0}") { env["PYTHONNOUSERSITE"] = "1" }
         p.environment = env
         let pipe = Pipe()
         p.standardInput = pipe
