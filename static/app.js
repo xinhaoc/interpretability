@@ -19,7 +19,7 @@ const h = (tag, attrs = {}, ...kids) => {
 const BACKEND_INFO = {
   claude_cli: ["Claude Code", "本机的 claude 命令，走你的 Claude 订阅，不需要 API key"],
   anthropic: ["Anthropic API", "用 API key 直接调 Claude（全文会被 prompt cache，追问很便宜）"],
-  codex: ["Codex CLI", "本机的 codex 命令，走你的 ChatGPT 订阅（不流式，答完一次性显示）"],
+  codex: ["Codex CLI", "本机的 codex 命令，走你的 ChatGPT 订阅（想完才一次性显示回答；等待时显示进度）"],
   openai: ["本地模型 / OpenAI 兼容接口", "Ollama、LM Studio、vLLM、OpenAI 等任何 /v1/chat/completions 接口"],
   mock: ["测试", "不调用模型，只回显收到了什么，用来检查界面"],
 };
@@ -27,13 +27,15 @@ const BACKEND_FIELDS = {
   claude_cli: [["model", "模型", "text", "留空=默认；可填 opus / sonnet / haiku 或完整模型名"], ["path", "claude 路径", "text", "留空自动查找"]],
   anthropic: [["model", "模型", "text", "claude-opus-5-5"], ["api_key", "API key", "password", "留空则用环境变量 ANTHROPIC_API_KEY"],
     ["effort", "思考程度", "select:low,medium,high,xhigh,max"], ["base_url", "Base URL", "text", "留空=官方"]],
-  codex: [["model", "模型", "text", "留空=codex 默认"], ["path", "codex 路径", "text", "留空自动查找"]],
+  codex: [["model", "模型", "text", "留空=codex 默认"],
+    ["effort", "思考程度", "select:low,medium,high,xhigh", "长论文用 high 会很慢（通读可能 10 分钟以上）"],
+    ["path", "codex 路径", "text", "留空自动查找"]],
   openai: [["base_url", "Base URL", "text", "http://localhost:11434/v1"], ["model", "模型", "text", "例如 qwen2.5vl:7b"],
     ["api_key", "API key", "password", "本地模型一般不需要"], ["vision", "支持图片", "checkbox"],
     ["max_context_chars", "上下文字符上限", "number", "60000"]],
   mock: [],
 };
-const ACTION_LABEL = { explain: "解释", math: "推导", simple: "通俗讲", connect: "联系全文", critique: "挑毛病" };
+const ACTION_LABEL = { explain: "解释", translate: "翻译", math: "推导", simple: "通俗讲", connect: "联系全文", critique: "挑毛病" };
 
 const state = {
   settings: null, detected: {}, papers: [],
@@ -42,6 +44,7 @@ const state = {
   activeThread: null, pending: null, regionMode: false,
   streaming: {}, // threadId -> text being streamed
   streamTools: {}, // threadId -> tool calls made while streaming
+  streamStatus: {}, // threadId -> "still working" line from a backend that cannot stream (Codex)
   aborts: {}, // threadId -> AbortController of the running answer
   live: {}, // threadId -> {pid, thread, mode} for answers still streaming
   drafts: {}, // threadId -> follow-up being typed
@@ -185,7 +188,8 @@ function openSettings() {
       input.addEventListener("change", () => {
         cfg[key] = type === "checkbox" ? input.checked : type === "number" ? Number(input.value) : input.value.trim();
       });
-      fields.append(h("label", {}, h("span", {}, label), input));
+      const hint = type.startsWith("select:") && ph ? h("small", { class: "field-hint" }, ph) : "";
+      fields.append(h("label", {}, h("span", {}, label), input, hint));
     }
   };
   for (const [key, [name, desc]] of Object.entries(BACKEND_INFO)) {
@@ -275,6 +279,7 @@ async function importUrl(url) {
 
 function closePaper() {
   state.openSeq = (state.openSeq || 0) + 1;
+  closeFind();
   state.paper = null;
   state.pdf?.destroy();
   state.pdf = null;
@@ -298,6 +303,7 @@ function closePaper() {
 async function openPaper(id) {
   if (state.paper?.id === id && state.pdf) return; // already open
   const tok = (state.openSeq = (state.openSeq || 0) + 1);
+  closeFind();
   mm?.onPaperChange();
   hidePopup();
   await flushMyNotes();
@@ -721,6 +727,7 @@ function showPopup(x, y) {
   if (y + 16 + hh > vr.bottom - 8) top = y - vr.top + viewer.scrollTop - hh - 16;
   pop.style.left = left + "px";
   pop.style.top = top + "px";
+  $("#vocab-btn").hidden = !(sel.kind === "text" && isWordish(sel.text));
   const input = $("input", pop);
   input.value = "";
   setTimeout(() => input.focus({ preventScroll: true }), 0);
@@ -833,6 +840,7 @@ async function ask({ thread_id, selection, action = "", question = "" }) {
         state.live[tid] = { pid, thread: ev.thread, mode: ev.mode };
         state.streaming[tid] = "";
         state.streamTools[tid] = [];
+        state.streamStatus[tid] = "";
         state.aborts[tid] = ctrl;
         if (!here()) return;
         const i = state.threads.findIndex((x) => x.id === tid);
@@ -845,8 +853,13 @@ async function ask({ thread_id, selection, action = "", question = "" }) {
         (state.streamTools[tid] ||= []).push(ev.label);
         const box = here() && $(`.thread[data-id="${tid}"] .tool-log.live`);
         if (box) box.replaceWith(toolLog(state.streamTools[tid], true));
+      } else if (ev.type === "status") {
+        state.streamStatus[tid] = ev.text;
+        const el = here() && $(`.thread[data-id="${tid}"] .stream-status`);
+        if (el) el.textContent = ev.text;
       } else if (ev.type === "delta") {
         state.streaming[tid] += ev.text;
+        here() && $(`.thread[data-id="${tid}"] .stream-status`)?.remove();
         const el = here() && $(`.thread[data-id="${tid}"] .streaming`);
         // Links are added once the answer is complete, so they stay clickable.
         if (el) renderLater(el, () => followStream(el, () => (el.innerHTML = renderMD(state.streaming[tid] ?? ""))));
@@ -889,6 +902,7 @@ function finishStream(tid, error, suffix = "") {
   live?.thread.messages.push(msg); // the same object is in state.threads when this paper is open
   delete state.streaming[tid];
   delete state.streamTools[tid];
+  delete state.streamStatus[tid];
   delete state.aborts[tid];
   delete state.live[tid];
   // Re-render only this thread, so a follow-up being typed elsewhere is left alone.
@@ -989,6 +1003,7 @@ function threadEl(t) {
   });
   if (t.id in state.streaming) {
     body.append(toolLog(state.streamTools[t.id] || [], true));
+    if (state.streamStatus[t.id] && !state.streaming[t.id]) body.append(h("div", { class: "stream-status" }, state.streamStatus[t.id]));
     const md = h("div", { class: "md streaming typing" });
     mdInto(md, state.streaming[t.id]);
     body.append(md);
@@ -1735,12 +1750,404 @@ function wireLinks() {
   });
 }
 
+// --------------------------------------------------------------------------- find in the paper (⌘F / Ctrl+F)
+
+const finder = { q: "", hits: [], cur: -1, seq: 0, timer: null };
+
+function openFind() {
+  if (!state.paper || mm?.isOpen()) return;
+  const input = $("#find-input");
+  const picked = (state.pending?.kind === "text" && state.pending.text) || String(window.getSelection() || "");
+  $("#find-bar").hidden = false;
+  if (picked.trim() && picked.length <= 100 && !picked.includes("\n")) {
+    input.value = picked.trim();
+    runFind();
+  }
+  input.focus();
+  input.select();
+}
+
+function closeFind() {
+  $("#find-bar").hidden = true;
+  clearTimeout(finder.timer);
+  finder.seq++;
+  finder.q = "";
+  finder.hits = [];
+  finder.cur = -1;
+  $$(".find-hit").forEach((el) => el.remove());
+  $("#find-count").textContent = "";
+}
+
+async function runFind() {
+  clearTimeout(finder.timer);
+  const q = $("#find-input").value.trim();
+  if (q === finder.q) return;
+  finder.q = q;
+  const seq = ++finder.seq, pid = state.paper?.id;
+  $$(".find-hit").forEach((el) => el.remove());
+  finder.hits = [];
+  finder.cur = -1;
+  const count = $("#find-count");
+  count.textContent = q && pid ? "…" : "";
+  if (!q || !pid) return;
+  let r;
+  try {
+    r = await api(`/api/papers/${pid}/find?q=${encodeURIComponent(q)}`);
+  } catch (e) {
+    if (seq === finder.seq) count.textContent = "出错了";
+    return;
+  }
+  if (seq !== finder.seq || state.paper?.id !== pid) return;
+  finder.hits = r.hits.map((hit) => {
+    const pv = state.pages[hit.page - 1];
+    const els = pv ? hit.rects.map((rc) => pv.div.appendChild(h("div", { class: "find-hit", style: pct(rc) }))) : [];
+    return { ...hit, els };
+  });
+  if (!finder.hits.length) { count.textContent = "没找到"; return; }
+  // Start from the first match at or below where you are reading.
+  const pos = readingPosition();
+  const i = finder.hits.findIndex((x) => x.page - 1 > pos.page || (x.page - 1 === pos.page && x.rects[0][1] >= pos.frac));
+  gotoHit(i < 0 ? 0 : i);
+}
+
+function gotoHit(i) {
+  const n = finder.hits.length;
+  if (!n) return;
+  finder.hits[finder.cur]?.els.forEach((el) => el.classList.remove("cur"));
+  finder.cur = ((i % n) + n) % n;
+  const hit = finder.hits[finder.cur];
+  hit.els.forEach((el) => el.classList.add("cur"));
+  $("#find-count").textContent = `${finder.cur + 1}/${n}`;
+  const pv = state.pages[hit.page - 1], viewer = $("#viewer");
+  if (!pv) return;
+  const y = pv.div.offsetTop + hit.rects[0][1] * pv.div.offsetHeight - viewer.clientHeight * 0.35;
+  viewer.scrollTo({ top: Math.max(0, y), behavior: "smooth" });
+}
+
+function wireFind() {
+  const input = $("#find-input");
+  input.addEventListener("input", () => { clearTimeout(finder.timer); finder.timer = setTimeout(runFind, 220); });
+  input.addEventListener("keydown", (e) => {
+    if (composing(e)) return;
+    if (e.key === "Enter") {
+      e.preventDefault();
+      if (input.value.trim() !== finder.q) runFind();
+      else gotoHit(finder.cur + (e.shiftKey ? -1 : 1));
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      closeFind();
+    }
+  });
+  $("#find-next").onclick = () => gotoHit(finder.cur + 1);
+  $("#find-prev").onclick = () => gotoHit(finder.cur - 1);
+  $("#find-close").onclick = closeFind;
+  window.openFind = openFind; // the macOS menu (编辑 → 查找) calls this
+}
+
+// --------------------------------------------------------------------------- copy
+
+// Selecting text in the paper moves the focus to the question box in the popup, so the
+// browser's own copy would find nothing selected: copy the selected paper text ourselves.
+// Ctrl+C is handled here as well as ⌘C.
+function selectedForCopy(e) {
+  const ae = document.activeElement;
+  if (ae && /^(INPUT|TEXTAREA)$/.test(ae.tagName) && ae.selectionStart !== ae.selectionEnd) {
+    return e.ctrlKey && !e.metaKey ? ae.value.slice(ae.selectionStart, ae.selectionEnd) : null; // ⌘C: the browser copies it
+  }
+  const s = window.getSelection();
+  if (s && !s.isCollapsed && !$("#sel-pop").contains(s.anchorNode)) return e.ctrlKey && !e.metaKey ? String(s) : null;
+  return state.pending?.kind === "text" ? state.pending.text : null;
+}
+
+async function writeClipboard(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    const ta = h("textarea", { style: "position:fixed;top:0;left:0;opacity:0" });
+    ta.value = text;
+    document.body.append(ta);
+    ta.select();
+    document.execCommand("copy");
+    ta.remove();
+  }
+}
+
+function copyKey(e) {
+  const text = selectedForCopy(e);
+  if (!text) return false;
+  e.preventDefault();
+  writeClipboard(text).then(() => toast("已复制", 1200));
+  return true;
+}
+
+// ⌘C that goes through the Edit menu instead of the keydown above.
+function onCopyEvent(e) {
+  const ae = document.activeElement;
+  const s = window.getSelection();
+  if (ae && /^(INPUT|TEXTAREA)$/.test(ae.tagName) && ae.selectionStart !== ae.selectionEnd) return;
+  if (s && !s.isCollapsed && !$("#sel-pop").contains(s.anchorNode)) return;
+  if (state.pending?.kind !== "text" || !state.pending.text) return;
+  e.clipboardData.setData("text/plain", state.pending.text);
+  e.preventDefault();
+}
+
+// --------------------------------------------------------------------------- word book
+
+const vocabWord = (t) => (t || "").replace(/\s+/g, " ").trim().replace(/^[^A-Za-z]+|[^A-Za-z]+$/g, "");
+const isWordish = (t) => {
+  const w = vocabWord(t);
+  return w.length >= 2 && w.length <= 40 && /^[A-Za-z][A-Za-z'’-]*(?: [A-Za-z][A-Za-z'’-]*){0,3}$/.test(w);
+};
+
+const vocab = { words: [], due: 0, view: "list", queue: [], total: 0, done: 0, shown: false, filter: "", editing: null, poll: null, justAdded: null };
+
+function setVocab(r) {
+  vocab.words = r.words;
+  vocab.due = r.due;
+  const badge = $("#vocab-due");
+  badge.hidden = !r.due;
+  badge.textContent = r.due;
+  // Tell the reader the meaning of the word they just added once it is ready.
+  const w = vocab.justAdded && r.words.find((x) => x.id === vocab.justAdded);
+  if (w && w.status !== "pending") {
+    vocab.justAdded = null;
+    toast(w.status === "ok" ? `${w.word}  ${w.phonetic || ""} ${w.pos || ""} ${w.meaning}` : `「${w.word}」的释义没生成出来：${w.error || ""}`, 7000);
+  }
+  if ($("#vocab-dlg").open && vocab.view === "list") renderVocabList();
+  clearTimeout(vocab.poll);
+  if (r.words.some((x) => x.status === "pending")) vocab.poll = setTimeout(refreshVocab, 2500);
+}
+
+async function refreshVocab() {
+  try { setVocab(await api("/api/vocab")); } catch (e) { console.error(e); }
+}
+
+async function vocabCall(path, method = "POST", body) {
+  try {
+    const r = await api(path, { method, headers: { "content-type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
+    setVocab(r);
+    return r;
+  } catch (e) {
+    toast(`出错了：${e.message}`);
+  }
+}
+
+async function addSelectionToVocab() {
+  const sel = state.pending;
+  hidePopup();
+  state.pending = null;
+  window.getSelection()?.removeAllRanges();
+  if (!sel || !state.paper) return;
+  const word = vocabWord(sel.text);
+  const r = await vocabCall("/api/vocab", "POST", { word, pid: state.paper.id, page: sel.page, bbox: sel.bbox });
+  if (!r) return;
+  if (r.word.status === "ok") {
+    toast(`「${r.word.word}」已经在生词本里了：记下了这次的句子，今天会再复习一次`);
+  } else {
+    vocab.justAdded = r.word.id;
+    toast(`已收进生词本：${word}（释义生成中…）`);
+  }
+}
+
+function speakBtn(word) {
+  return h("button", {
+    type: "button", class: "icon speak", title: "读一遍",
+    onclick: (e) => {
+      e.stopPropagation();
+      const u = new SpeechSynthesisUtterance(word);
+      u.lang = "en-US";
+      speechSynthesis.cancel();
+      speechSynthesis.speak(u);
+    },
+  }, "🔊");
+}
+
+// The sentence the word came from, with the word marked.
+function ctxSentence(sentence, word) {
+  const el = h("div", { class: "vw-sent" });
+  const re = new RegExp(`(${word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/ /g, "\\s+")}\\w*)`, "gi");
+  el.innerHTML = esc(sentence).replace(re, "<mark>$1</mark>");
+  return el;
+}
+
+async function jumpToSource(c) {
+  if (!state.papers.some((p) => p.id === c.pid)) return toast("那篇论文已经不在论文库里了");
+  $("#vocab-dlg").close();
+  await openPaper(c.pid);
+  if (state.paper?.id === c.pid) jumpTo({ page: c.page + 1, kind: "quote", rects: c.bbox ? [c.bbox] : undefined });
+}
+
+function openVocab() {
+  vocab.view = "list";
+  vocab.editing = null;
+  renderVocab();
+  $("#vocab-dlg").showModal();
+  refreshVocab();
+}
+
+function renderVocab() {
+  const body = $("#vocab-body");
+  body.innerHTML = "";
+  if (vocab.view === "review") {
+    renderReview(body);
+    body.focus({ preventScroll: true }); // keys (space, 1-3) go to the card, not a stale button
+    return;
+  }
+  const search = h("input", { type: "search", placeholder: "搜索单词或释义", value: vocab.filter });
+  search.oninput = () => { vocab.filter = search.value; renderVocabList(); };
+  body.append(
+    h("div", { class: "vocab-head" },
+      h("h2", {}, "生词本"), h("span", { id: "vocab-stats", class: "hint" }),
+      h("span", { class: "spacer" }),
+      h("button", { id: "vocab-review", class: "primary", onclick: startReview }),
+      h("button", { class: "icon", title: "关闭（Esc）", onclick: () => $("#vocab-dlg").close() }, "✕")),
+    search,
+    h("div", { id: "vocab-list" }));
+  renderVocabList();
+}
+
+function renderVocabList() {
+  const list = $("#vocab-list");
+  if (!list) return;
+  const now = Date.now() / 1000;
+  const due = vocab.words.filter((w) => w.due <= now && w.status !== "pending").length;
+  $("#vocab-stats").textContent = `${vocab.words.length} 个词`;
+  const rb = $("#vocab-review");
+  rb.textContent = due ? `开始复习（${due}）` : "今天没有要复习的";
+  rb.disabled = !due;
+  const f = vocab.filter.trim().toLowerCase();
+  const words = vocab.words
+    .filter((w) => !f || [w.word, w.lemma, w.meaning, w.general].some((x) => (x || "").toLowerCase().includes(f)))
+    .sort((a, b) => b.added - a.added);
+  list.innerHTML = "";
+  if (!vocab.words.length) {
+    list.append(h("p", { class: "hint vocab-empty" }, "还没有生词。在论文里选中一个英文单词（或短语），点弹出框里的「＋ 生词本」就会收进来：记下它所在的句子，自动写好这句里的意思，之后按间隔复习。"));
+    return;
+  }
+  for (const w of words) list.append(vocabRow(w, now));
+}
+
+function vocabRow(w, now) {
+  if (vocab.editing === w.id) return vocabEditor(w);
+  const lemma = w.lemma && w.lemma.toLowerCase() !== w.word.toLowerCase() ? h("span", { class: "hint" }, `→ ${w.lemma}`) : "";
+  const days = Math.ceil((w.due - now) / 86400);
+  const when = w.due <= now ? "今天复习" : `${days} 天后复习`;
+  const level = h("span", { class: "vw-level", title: `熟练度 ${w.box}/7 · 复习过 ${w.reviews} 次` }, "●".repeat(w.box) + "○".repeat(7 - w.box));
+  let meaning;
+  if (w.status === "pending") meaning = h("div", { class: "hint typing" }, "释义生成中…");
+  else if (w.status === "error") {
+    meaning = h("div", { class: "vw-err" }, `释义没生成出来：${w.error || ""} `,
+      h("button", { onclick: () => vocabCall(`/api/vocab/${w.id}/define`) }, "重试"));
+  } else {
+    meaning = h("div", {},
+      h("div", { class: "vw-mean" }, w.meaning || ""),
+      w.general ? h("div", { class: "hint" }, `常见义：${w.general}`) : "",
+      w.note ? h("div", { class: "hint" }, w.note) : "");
+  }
+  const ctxs = w.contexts.slice(-2).reverse().map((c) => h("div", { class: "vw-ctx" },
+    c.sentence ? ctxSentence(c.sentence, w.word) : "",
+    c.pid ? h("a", { href: "#", class: "vw-src", onclick: (e) => { e.preventDefault(); jumpToSource(c); } }, `${c.title || "论文"} · p.${c.page + 1}`) : ""));
+  return h("div", { class: "vw" },
+    h("div", { class: "vw-top" },
+      h("b", { class: "vw-word" }, w.word), lemma,
+      h("span", { class: "vw-ipa" }, w.phonetic || ""), h("span", { class: "vw-pos" }, w.pos || ""), speakBtn(w.word),
+      h("span", { class: "spacer" }),
+      level, h("span", { class: "hint" }, when),
+      h("button", { class: "icon", title: "改释义", onclick: () => { vocab.editing = w.id; renderVocabList(); } }, "✎"),
+      h("button", { class: "icon", title: "重新生成释义", onclick: () => vocabCall(`/api/vocab/${w.id}/define`) }, "↻"),
+      h("button", { class: "icon", title: "删除", onclick: () => { if (confirm(`从生词本删除「${w.word}」？`)) vocabCall(`/api/vocab/${w.id}`, "DELETE"); } }, "🗑")),
+    meaning, ...ctxs);
+}
+
+function vocabEditor(w) {
+  const fields = [["phonetic", "音标"], ["pos", "词性"], ["meaning", "本句意思"], ["general", "常见义"], ["note", "备注"]];
+  const inputs = Object.fromEntries(fields.map(([k]) => [k, h("input", { value: w[k] || "" })]));
+  const save = async () => {
+    const r = await vocabCall(`/api/vocab/${w.id}`, "PUT", Object.fromEntries(fields.map(([k]) => [k, inputs[k].value.trim()])));
+    if (r) { vocab.editing = null; renderVocabList(); }
+  };
+  return h("div", { class: "vw editing" },
+    h("b", { class: "vw-word" }, w.word),
+    ...fields.map(([k, label]) => h("label", { class: "row" }, h("span", {}, label), inputs[k])),
+    h("div", { class: "vw-edit-actions" },
+      h("button", { onclick: () => { vocab.editing = null; renderVocabList(); } }, "取消"),
+      h("button", { class: "primary", onclick: save }, "保存")));
+}
+
+function startReview() {
+  const now = Date.now() / 1000;
+  vocab.queue = vocab.words.filter((w) => w.due <= now && w.status !== "pending").sort((a, b) => a.due - b.due).map((w) => w.id);
+  vocab.total = vocab.queue.length;
+  vocab.done = 0;
+  vocab.shown = false;
+  vocab.view = "review";
+  renderVocab();
+}
+
+function renderReview(body) {
+  const w = vocab.words.find((x) => x.id === vocab.queue[0]);
+  const back = () => { vocab.view = "list"; renderVocab(); };
+  if (!w) {
+    body.append(h("div", { class: "vr-done" },
+      h("h2", {}, "这一轮复习完了"),
+      h("p", { class: "hint" }, `复习了 ${vocab.done} 个词。认识的词会隔几天再出现，越熟间隔越长；不认识的会在今天再出现。`),
+      h("button", { class: "primary", onclick: back }, "回到生词本")));
+    return;
+  }
+  const c = w.contexts.at(-1) || {};
+  const grade = (g, label, key) => h("button", { class: `grade ${g}`, onclick: () => gradeWord(g) }, label, h("kbd", {}, key));
+  body.append(
+    h("div", { class: "vocab-head" },
+      h("h2", {}, "复习"), h("span", { class: "hint" }, `${Math.min(vocab.done + 1, vocab.total)} / ${vocab.total}`),
+      h("span", { class: "spacer" }), h("button", { onclick: back }, "结束复习")),
+    h("div", { class: "vr-card" },
+      h("div", { class: "vr-word" }, w.word, speakBtn(w.word)),
+      h("div", { class: "vr-ipa" }, [w.phonetic, w.pos].filter(Boolean).join("   ")),
+      c.sentence ? ctxSentence(c.sentence, w.word) : "",
+      vocab.shown ? h("div", { class: "vr-ans" },
+        h("div", { class: "vw-mean" }, w.meaning || "（还没有释义）"),
+        w.general ? h("div", { class: "hint" }, `常见义：${w.general}`) : "",
+        w.note ? h("div", { class: "hint" }, w.note) : "",
+        c.title ? h("div", { class: "hint vr-src" }, `出自 ${c.title} · p.${c.page + 1}`) : "") : ""),
+    vocab.shown
+      ? h("div", { class: "vr-grades" }, grade("again", "不认识", "1"), grade("hard", "模糊", "2"), grade("good", "认识", "3"))
+      : h("div", { class: "vr-grades" }, h("button", { class: "primary", onclick: () => { vocab.shown = true; renderVocab(); } }, "显示释义", h("kbd", {}, "空格"))));
+}
+
+async function gradeWord(g) {
+  const id = vocab.queue.shift();
+  if (!id) return;
+  if (g === "again") vocab.queue.push(id); // comes back later in this round
+  else vocab.done++;
+  vocab.shown = false;
+  renderVocab();
+  await vocabCall(`/api/vocab/${id}/review`, "POST", { grade: g });
+}
+
+function wireVocab() {
+  $("#vocab-open").onclick = openVocab;
+  $("#vocab-btn").addEventListener("mousedown", (e) => e.preventDefault());
+  $("#vocab-btn").onclick = addSelectionToVocab;
+  document.addEventListener("keydown", (e) => {
+    if (!$("#vocab-dlg").open || vocab.view !== "review" || e.target.closest("input, textarea") || e.metaKey || e.ctrlKey) return;
+    if (e.key === " " && !vocab.shown) { e.preventDefault(); vocab.shown = true; renderVocab(); }
+    else if (vocab.shown && ["1", "2", "3"].includes(e.key)) { e.preventDefault(); gradeWord(["again", "hard", "good"][Number(e.key) - 1]); }
+  });
+  $("#vocab-dlg").addEventListener("click", (e) => { if (e.target === e.currentTarget) e.currentTarget.close(); }); // click outside
+  refreshVocab();
+  setInterval(refreshVocab, 10 * 60 * 1000); // words become due as time passes
+}
+
 // --------------------------------------------------------------------------- wiring
 
 let mm = null; // the derivation map view
 
 function wire() {
   wireLinks();
+  wireFind();
+  wireVocab();
+  document.addEventListener("copy", onCopyEvent);
   mm = initMindmap({ state, api, h, $, toast, renderCrop, jumpTo, ask, readSSE });
   $("#toggle-lib").onclick = () => document.body.classList.toggle("lib-hidden");
   $("#backend-btn").onclick = openSettings;
@@ -1821,6 +2228,12 @@ function wire() {
 
   document.addEventListener("keydown", (e) => {
     const typing = e.target.closest("input, textarea, select, dialog, [contenteditable]") || mm?.isOpen();
+    const mod = (e.metaKey || e.ctrlKey) && !(e.metaKey && e.ctrlKey) && !e.altKey; // ⌃⌘F is full screen
+    const key = e.key.toLowerCase();
+    if (mod && key === "f") { e.preventDefault(); openFind(); return; }
+    if (mod && key === "g" && finder.hits.length) { e.preventDefault(); gotoHit(finder.cur + (e.shiftKey ? -1 : 1)); return; }
+    if (mod && key === "c" && !e.shiftKey && copyKey(e)) return;
+    if (e.key === "Escape" && !composing(e) && !$("#find-bar").hidden && !e.target.closest("dialog")) closeFind();
     if (e.key === "Escape" && !composing(e)) { hidePopup(); state.pending = null; setRegionMode(false); }
     if (typing || e.metaKey || e.ctrlKey) return;
     if ((e.key === "r" || e.key === "R") && state.paper) setRegionMode(!state.regionMode);

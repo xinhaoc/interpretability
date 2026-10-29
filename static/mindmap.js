@@ -220,6 +220,7 @@ export function initMindmap(ctx) {
       let result = null, error = null;
       await ctx.readSSE(resp, (ev) => {
         if (ev.type === "progress" && ev.nodes) status(`正在生成… 已写 ${ev.nodes} 个节点`);
+        else if (ev.type === "progress" && ev.status) status(ev.status);
         if (ev.type === "done") result = ev.map;
         if (ev.type === "error") error = ev.message;
       });

@@ -59,6 +59,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
 
     func applicationDidFinishLaunching(_ note: Notification) {
         buildMenu()
+        // Ctrl+V / X / Z do what ⌘V / X / Z do (for people used to Windows / Linux keys).
+        // Ctrl+C and Ctrl+F are handled by the page itself.
+        NSEvent.addLocalMonitorForEvents(matching: .keyDown) { e in
+            guard e.modifierFlags.intersection(.deviceIndependentFlagsMask) == .control else { return e }
+            let action: Selector?
+            switch e.charactersIgnoringModifiers?.lowercased() {
+            case "v": action = #selector(NSText.paste(_:))
+            case "x": action = #selector(NSText.cut(_:))
+            case "z": action = Selector(("undo:"))
+            default: action = nil
+            }
+            guard let action else { return e }
+            NSApp.sendAction(action, to: nil, from: nil)
+            return nil
+        }
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1440, height: 900),
                           styleMask: [.titled, .closable, .miniaturizable, .resizable],
                           backing: .buffered, defer: false)
@@ -328,6 +343,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
 
     func js(_ code: String) { web.evaluateJavaScript(code) }
     @objc func openSettings(_ sender: Any?) { js("document.querySelector('#backend-btn')?.click()") }
+    @objc func findInPaper(_ sender: Any?) { js("window.openFind && window.openFind()") }
     @objc func reloadPage(_ sender: Any?) {
         startServer()  // reloads the page, and restarts the server first if it is gone
     }
@@ -378,6 +394,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
             item("拷贝", #selector(NSText.copy(_:)), "c"),
             item("粘贴", #selector(NSText.paste(_:)), "v"),
             item("全选", #selector(NSText.selectAll(_:)), "a"),
+            .separator(),
+            item("在论文里查找…", #selector(findInPaper(_:)), "f", target: self),
         ])
         submenu("显示", [
             item("放大", #selector(zoomIn(_:)), "=", target: self),

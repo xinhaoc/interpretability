@@ -26,6 +26,7 @@ import latex
 import mindmap
 import memory
 import paper_tools
+import vocab
 from backends import BACKENDS, TOOL_BACKENDS, BackendError, can_see
 
 ROOT = Path(__file__).parent
@@ -50,7 +51,7 @@ DEFAULT_SETTINGS = {
         "anthropic": {"model": "claude-opus-5-5", "api_key": "", "base_url": "", "effort": "medium"},
         "openai": {"base_url": "http://localhost:11434/v1", "model": "", "api_key": "", "vision": True,
                    "max_context_chars": 60000},
-        "codex": {"model": "", "path": ""},
+        "codex": {"model": "", "path": "", "effort": "medium"},
         "mock": {},
     },
 }
@@ -303,7 +304,9 @@ ACTIONS = {
     "simple": ("通俗讲", "Explain it as simply as possible, then give one small concrete example with actual numbers."),
     "connect": ("联系全文", "How does this connect to the rest of the paper? What earlier parts does it rely on, and where is it used later (method, experiments, claims)?"),
     "critique": ("挑毛病", "Critically examine it: hidden assumptions, possible flaws, missing comparisons or ablations, and what would make it more convincing."),
+    "translate": ("翻译", "Translate the selection into the language you answer in. Output only the translation: no preamble, no explanation, no quotes from the paper. Keep equations and symbols as LaTeX, keep citation marks like [12], and on first use put the English term in parentheses after each technical term, e.g. 稀疏自编码器 (sparse autoencoder). If the selection is an image, translate the text in it."),
 }
+NO_TOOL_ACTIONS = {"translate"}  # quick answers: no need to look things up in the paper
 
 
 def region_text(pdf_path, page_no, rect, pad_y=0.0):
@@ -400,12 +403,19 @@ class Job:
 JOBS: dict[str, Job] = {}
 
 
-async def collect(backend, system, msgs, cfg):
+async def collect(backend, system, msgs, cfg, on_status=None):
     out = ""
     async for chunk in backend(system, msgs, cfg):
         if isinstance(chunk, str):
             out += chunk
+        elif on_status and "status" in chunk:  # a slow backend saying it is still working
+            await on_status(chunk["status"])
     return out
+
+
+def phase_status(job, phase):
+    """on_status for collect(): show the backend's status after the current phase."""
+    return lambda st: job.push(phase=f"{phase} {st}")
 
 
 LATEX_NOTE = ("The authors' LaTeX source is also given. Use it for exact equations, symbols and macro definitions; "
@@ -434,6 +444,8 @@ async def read_notes(d, meta, pages, settings, job):
         async for chunk in backend(system, msgs, cfg):
             if isinstance(chunk, str):
                 await job.push(chunk)
+            elif "status" in chunk:
+                await job.push(phase=f"正在通读全文、写笔记… {chunk['status']}")
     else:
         # Paper does not fit: notes per chunk, then merge.
         chunks, cur = [], []
@@ -445,11 +457,13 @@ async def read_notes(d, meta, pages, settings, job):
         chunks.append(cur)
         part_notes = []
         for k, ch in enumerate(chunks):
-            await job.push(phase=f"正在读第 {k + 1}/{len(chunks)} 部分（第 {ch[0] + 1}-{ch[-1] + 1} 页）…")
+            ph = f"正在读第 {k + 1}/{len(chunks)} 部分（第 {ch[0] + 1}-{ch[-1] + 1} 页）…"
+            await job.push(phase=ph)
             prompt = CHUNK_PROMPT.format(i=k + 1, n=len(chunks), a=ch[0] + 1, b=ch[-1] + 1,
                                          language=lang, text=paper_text(pages, ch))
             part_notes.append(await collect(backend, "You are a careful research assistant.",
-                                            [{"role": "user", "content": [{"type": "text", "text": prompt}]}], cfg))
+                                            [{"role": "user", "content": [{"type": "text", "text": prompt}]}], cfg,
+                                            phase_status(job, ph)))
         await job.push(phase="正在合并笔记…")
         parts = "\n\n".join(f"<part n={k + 1}>\n{t}\n</part>" for k, t in enumerate(part_notes))
         prompt = MERGE_PROMPT.format(title=meta["title"], parts=parts, language=lang)
@@ -457,6 +471,8 @@ async def read_notes(d, meta, pages, settings, job):
                                    [{"role": "user", "content": [{"type": "text", "text": prompt}]}], cfg):
             if isinstance(chunk, str):
                 await job.push(chunk)
+            elif "status" in chunk:
+                await job.push(phase=f"正在合并笔记… {chunk['status']}")
     memory.save_notes(d, job.text, source_of(settings))
 
 
@@ -513,7 +529,8 @@ async def read_figures(d, pages, settings, job):
     step = 0
     for batch in page_batches:
         step += 1
-        await job.push(phase=f"正在看图表（{step}/{total}，第 {', '.join(map(str, batch))} 页）…")
+        ph = f"正在看图表（{step}/{total}，第 {', '.join(map(str, batch))} 页）…"
+        await job.push(phase=ph)
         content = []
         for pn in batch:
             png = await asyncio.to_thread(paper_tools.view_page, d, pn)
@@ -521,12 +538,14 @@ async def read_figures(d, pages, settings, job):
                         {"type": "image", "media_type": "image/png", "data": base64.b64encode(png).decode()}]
         items = "\n".join(f"- {f['label']} (page {f['page']}): {f['caption'][:200]}" for f in figs if f["page"] in batch)
         content.append({"type": "text", "text": memory.FIGURE_PROMPT.format(items=items, language=settings["language"])})
-        apply(await collect(backend, system, [{"role": "user", "content": content}], cfg), keep_bbox=False)
+        apply(await collect(backend, system, [{"role": "user", "content": content}], cfg, phase_status(job, ph)),
+              keep_bbox=False)
         save()  # after each batch
     # Figures without captions: crop each one, 6 per request; their boxes are already known.
     for batch in crop_batches:
         step += 1
-        await job.push(phase=f"正在看图表（{step}/{total}，无编号的图）…")
+        ph = f"正在看图表（{step}/{total}，无编号的图）…"
+        await job.push(phase=ph)
         content = []
         for f in batch:
             b = f["bbox"]
@@ -535,7 +554,8 @@ async def read_figures(d, pages, settings, job):
             content += [{"type": "text", "text": f"Item {f['label']} (page {f['page']}).{near}"},
                         {"type": "image", "media_type": "image/png", "data": base64.b64encode(png).decode()}]
         content.append({"type": "text", "text": memory.FIGURE_CROP_PROMPT.format(language=settings["language"])})
-        apply(await collect(backend, system, [{"role": "user", "content": content}], cfg), keep_bbox=True)
+        apply(await collect(backend, system, [{"role": "user", "content": content}], cfg, phase_status(job, ph)),
+              keep_bbox=True)
         save()
     save()
 
@@ -747,6 +767,110 @@ async def locate(pid: str, req: Request):
     return await asyncio.to_thread(lambda: [one(it) for it in items])
 
 
+@app.get("/api/papers/{pid}/find")
+async def find(pid: str, q: str = ""):
+    """Find in the paper (⌘F): every occurrence with its boxes on the page."""
+    d = pdir(pid)
+    return {"hits": await asyncio.to_thread(paper_tools.find_text, d, q[:200])}
+
+
+# --------------------------------------------------------------------------- word book
+
+DEFINING: set[str] = set()
+
+
+async def define_word(wid):
+    if wid in DEFINING:
+        return
+    DEFINING.add(wid)
+    try:
+        e = vocab.get(DATA, wid)
+        if not e:
+            return
+        settings = load_settings()
+        name = settings["backend"]
+        c = e["contexts"][-1] if e["contexts"] else {}
+        prompt = vocab.DEFINE_PROMPT.format(title=c.get("title", ""), word=e["word"], sentence=c.get("sentence", ""),
+                                            language=settings["language"])
+        vocab.update(DATA, wid, status="pending")
+        try:
+            out = await collect(BACKENDS[name], "You are a concise bilingual dictionary.",
+                                [{"role": "user", "content": [{"type": "text", "text": prompt}]}],
+                                settings["backends"].get(name, {}))
+            fields = vocab.parse_definition(out)
+            if not fields.get("meaning"):
+                raise BackendError("模型没有按格式回答")
+            vocab.update(DATA, wid, **fields, status="ok", error="", defined_by=source_of(settings))
+        except Exception as ex:
+            vocab.update(DATA, wid, status="error", error=str(ex)[:300])
+    finally:
+        DEFINING.discard(wid)
+
+
+def vocab_view():
+    words = vocab.load(DATA)
+    return {"words": words, "due": vocab.due_count(words), "now": time.time()}
+
+
+@app.get("/api/vocab")
+def get_vocab():
+    return vocab_view()
+
+
+@app.post("/api/vocab")
+async def add_vocab(req: Request):
+    body = await req.json()
+    word = vocab.clean_word(str(body.get("word", "")))[:80]
+    if not word:
+        raise HTTPException(400, "empty word")
+    ctx = {}
+    pid = body.get("pid")
+    if pid:
+        d = pdir(pid)
+        page, bbox = int(body.get("page", 0)), body.get("bbox")
+        sentence = await asyncio.to_thread(paper_tools.sentence_at, d, page + 1, bbox) if bbox else ""
+        ctx = {"pid": pid, "title": read_json(d / "meta.json", {}).get("title", ""), "page": page,
+               "bbox": bbox, "sentence": sentence}
+    e, needs = vocab.add(DATA, word, ctx)
+    if needs:
+        asyncio.create_task(define_word(e["id"]))
+    return {"word": e, **vocab_view()}
+
+
+@app.put("/api/vocab/{wid}")
+async def edit_vocab(wid: str, req: Request):
+    body = await req.json()
+    fields = {k: str(v)[:500] for k, v in body.items() if k in vocab.FIELDS}
+    if not vocab.update(DATA, wid, **fields, status="ok"):
+        raise HTTPException(404, "word not found")
+    return vocab_view()
+
+
+@app.delete("/api/vocab/{wid}")
+def delete_vocab(wid: str):
+    vocab.delete(DATA, wid)
+    return vocab_view()
+
+
+@app.post("/api/vocab/{wid}/review")
+async def review_vocab(wid: str, req: Request):
+    grade = (await req.json()).get("grade")
+    if grade not in ("again", "hard", "good"):
+        raise HTTPException(400, "grade must be again, hard or good")
+    if not vocab.review(DATA, wid, grade):
+        raise HTTPException(404, "word not found")
+    return vocab_view()
+
+
+@app.post("/api/vocab/{wid}/define")
+async def redefine_vocab(wid: str):
+    if not vocab.get(DATA, wid):
+        raise HTTPException(404, "word not found")
+    vocab.update(DATA, wid, status="pending")
+    asyncio.create_task(define_word(wid))
+    return vocab_view()
+
+
 @app.get("/api/papers/{pid}/memory")
 def get_memory(pid: str):
     return memory_view(pdir(pid))
@@ -932,7 +1056,7 @@ async def ask(pid: str, req: Request):
     pages = read_json(d / "pages.json", [])
     focus = thread["selection"]["page"] if thread["selection"] else 0
     name = settings["backend"]
-    wants_tools = name in TOOL_BACKENDS
+    wants_tools = name in TOOL_BACKENDS and action not in NO_TOOL_ACTIONS
     system, mode = await asyncio.to_thread(build_system, d, meta, pages, settings, focus, wants_tools)
     tools_on = wants_tools and mode == "memory"
 
@@ -983,6 +1107,9 @@ async def ask(pid: str, req: Request):
         answer, saved = "", False
         try:
             async for chunk in backend(system, msgs, cfg, tools=d if tools_on else None):
+                if isinstance(chunk, dict) and "status" in chunk:
+                    yield sse({"type": "status", "text": chunk["status"]})
+                    continue
                 if isinstance(chunk, dict):
                     lbl = paper_tools.describe_call(chunk["tool"], chunk.get("input", {}))
                     used_tools.append(lbl)
@@ -1069,6 +1196,8 @@ async def generate_mindmap(pid: str):
                 if isinstance(chunk, str):
                     out += chunk
                     yield sse({"type": "progress", "nodes": len(re.findall(r"^\s*[-*]\s+(?:n\d+\s*)?\[", out, re.M))})
+                elif "status" in chunk:
+                    yield sse({"type": "progress", "nodes": 0, "status": chunk["status"]})
             data = mindmap.parse(out)
             if not data["root"]["children"]:
                 raise BackendError("模型没有按格式输出导图，再试一次。")

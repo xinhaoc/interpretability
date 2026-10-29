@@ -28,6 +28,7 @@
   <div id="mode-switch" title="记忆模式：每次只发这篇论文的记忆（通读笔记、图表描述、问答沉淀）和当前页，细节由模型用工具去查原文。快、省，换模型也一样。&#10;全文模式：每次都附上整篇原文，细节最稳，但更费 token。">
     <span class="lbl">上下文</span><button data-mode="memory">📒 记忆</button><button data-mode="full">📄 全文</button>
   </div>
+  <button id="vocab-open" title="生词本：你在论文里收的词，按时复习">📖 生词本<span id="vocab-due" class="badge" hidden></span></button>
   <button id="backend-btn" title="模型设置">⚙ <span id="backend-name"></span></button>
 </header>
 
@@ -53,6 +54,13 @@
       </ol>
     </div>
     <div id="region-hint" hidden>拖一个框选中公式 / 图 / 表 · Esc 取消</div>
+    <div id="find-bar" hidden><div class="find-box">
+      <input id="find-input" placeholder="在论文里查找" autocomplete="off" spellcheck="false">
+      <span id="find-count"></span>
+      <button id="find-prev" class="icon" title="上一个（Shift+Enter）">↑</button>
+      <button id="find-next" class="icon" title="下一个（Enter）">↓</button>
+      <button id="find-close" class="icon" title="关闭（Esc）">✕</button>
+    </div></div>
     <div id="back-wrap"><button id="back-btn" hidden title="回到跳转前的位置（Alt+← 或 Backspace）">↩ 回到刚才读的地方</button></div>
     <div id="pages"></div>
   </section>
@@ -104,15 +112,19 @@
   <div class="pop-head"><span id="pop-what"></span><span id="pop-target"></span></div>
   <div class="acts">
     <button data-act="explain">解释</button>
+    <button data-act="translate">翻译</button>
     <button data-act="math">推导</button>
     <button data-act="simple">通俗讲</button>
     <button data-act="connect">联系全文</button>
     <button data-act="critique">挑毛病</button>
+    <button id="vocab-btn" class="vocab-btn" title="把这个词收进生词本（会记下它所在的句子，自动查释义，之后可以复习）" hidden>＋ 生词本</button>
     <button id="note-btn" class="note-btn" title="划线并写下自己的批注">✎ 记笔记</button>
   </div>
   <div id="note-editor"></div>
   <form><input placeholder="输入问题，Enter 发送（空着按 Enter = 解释）"></form>
 </div>
+
+<dialog id="vocab-dlg"><div id="vocab-body" tabindex="-1"></div></dialog>
 
 <dialog id="settings">
   <form method="dialog" id="settings-form">

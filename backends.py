@@ -12,6 +12,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import httpx
@@ -279,13 +280,16 @@ async def openai_compat(system, messages, cfg, tools=None):
 # --------------------------------------------------------------------------- Codex CLI
 
 async def codex_cli(system, messages, cfg, tools=None):
+    """Codex prints its answer only when done, so while it works this yields {"status": ...}
+    every few seconds (elapsed time, and its reasoning summaries as they finish)."""
     exe = cfg.get("path") or _find_exe("codex")
     if not exe:
         raise BackendError("找不到 codex 命令。请先安装（npm i -g @openai/codex）并登录，或在设置里填写路径。")
     workdir = tempfile.mkdtemp(prefix="interpretability-")
     try:
         blocks = _flatten(messages)
-        args = [exe, "exec", "--skip-git-repo-check", "--sandbox", "read-only", "--color", "never"]
+        args = [exe, "exec", "--json", "--skip-git-repo-check", "--sandbox", "read-only", "--color", "never",
+                "-c", f"model_reasoning_effort={cfg.get('effort') or 'medium'}"]
         if cfg.get("model"):
             args += ["-m", cfg["model"]]
         for i, b in enumerate(x for x in blocks if x["type"] == "image"):
@@ -299,17 +303,49 @@ async def codex_cli(system, messages, cfg, tools=None):
                   + "\n".join(b["text"] for b in blocks if b["type"] == "text"))
         proc = await asyncio.create_subprocess_exec(
             *args, cwd=workdir, stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, limit=1 << 24)
+        err_task = asyncio.create_task(proc.stderr.read())
+        t0, thought, failure = time.monotonic(), "", ""
+
+        def status():
+            m, s = divmod(int(time.monotonic() - t0), 60)
+            took = f"{m} 分 {s} 秒" if m else f"{s} 秒"
+            return {"status": f"Codex 在想：{thought}（已用 {took}）" if thought else
+                    f"Codex 正在读、在想…（已用 {took}；Codex 想完才一次性给出回答）"}
         try:
-            _, err = await proc.communicate(prompt.encode())
+            proc.stdin.write(prompt.encode())
+            await proc.stdin.drain()
+            proc.stdin.close()
+            yield status()
+            while True:
+                try:
+                    line = await asyncio.wait_for(proc.stdout.readline(), 10)
+                except asyncio.TimeoutError:
+                    yield status()
+                    continue
+                if not line:
+                    break
+                try:
+                    ev = json.loads(line)
+                except ValueError:
+                    continue
+                item = ev.get("item") or {}
+                if ev.get("type") == "item.completed" and item.get("type") == "reasoning" and item.get("text"):
+                    thought = item["text"].strip().splitlines()[0].strip("*# ")[:80]
+                    yield status()
+                elif ev.get("type") in ("error", "turn.failed"):
+                    failure = (ev.get("error") or {}).get("message") or ev.get("message") or failure
+            await proc.wait()
+            err = await err_task
         except BaseException:  # the reader stopped the answer: don't leave codex running
             proc.kill()
             await proc.wait()
+            err_task.cancel()
             raise
         if out_file.exists() and out_file.read_text().strip():
             yield out_file.read_text()
         else:
-            raise BackendError(f"codex 退出码 {proc.returncode}：{err.decode(errors='replace')[-1500:]}")
+            raise BackendError(f"codex 退出码 {proc.returncode}：{failure or err.decode(errors='replace')[-1500:]}")
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 

@@ -207,3 +207,65 @@ def locate_quote(paper_dir: Path, page: int, quote: str):
     spans = [{"page": p_, "rects": rs} for p_, rs in sorted(spans.items())]
     return {"verified": True, "page": spans[0]["page"], "rects": spans[0]["rects"], "spans": spans,
             "score": round(best["score"], 2)}
+
+
+def _shown(pg, r):
+    """A box in unrotated page points -> fractions of the page as displayed."""
+    s = fitz.Rect(r) * pg.rotation_matrix
+    W, H = pg.rect.width, pg.rect.height
+    return [s.x0 / W, s.y0 / H, s.x1 / W, s.y1 / H]
+
+
+def find_text(paper_dir: Path, query: str, limit: int = 1000):
+    """Every place the text occurs (case-insensitive), in reading order: [{page, rects}].
+    A match broken over two lines is one hit with two rects."""
+    query = " ".join(query.split())
+    if not query:
+        return []
+    doc = fitz.open(paper_dir / "paper.pdf")
+    hits = []
+    want = query.lower()
+    for pno, pg in enumerate(doc, 1):
+        cur = None
+        for q in pg.search_for(query, quads=True):
+            r = q.rect
+            # search_for gives one quad per line, so a match wrapped onto the next line comes as two
+            # quads that each hold only part of the text: join such a pair into one hit.
+            partial = want not in " ".join(pg.get_textbox(r + (-1, -1, 1, 1)).split()).lower()
+            if partial and cur and cur["_partial"] and r.y0 >= cur["_last"].y1 - 2:
+                cur["rects"].append(_shown(pg, r))
+                cur["_partial"] = False
+                continue
+            cur = {"page": pno, "rects": [_shown(pg, r)], "_last": r, "_partial": partial}
+            hits.append(cur)
+        if len(hits) >= limit:
+            break
+    return [{"page": h["page"], "rects": h["rects"]} for h in hits[:limit]]
+
+
+def sentence_at(paper_dir: Path, page: int, bbox) -> str:
+    """The sentence around a selection (page is 1-based, bbox in displayed fractions)."""
+    doc = fitz.open(paper_dir / "paper.pdf")
+    if not 1 <= page <= len(doc):
+        return ""
+    pg = doc[page - 1]
+    words = pg.get_text("words")
+    cx, cy = (bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2
+    best, hit = 9.0, None
+    for i, w in enumerate(words):
+        b = _shown(pg, w[:4])
+        d = max(b[0] - cx, 0, cx - b[2]) + max(b[1] - cy, 0, cy - b[3])
+        if d < best:
+            best, hit = d, i
+    if hit is None:
+        return ""
+    # Walk out from the word to the sentence ends (at most 50 words each way), across lines and blocks.
+    ends = lambda w: re.search(r"[.!?][)\]\"']?$", w[4]) and not re.fullmatch(r"(?:e\.g|i\.e|et al|Fig|Eq|cf|vs)\.", w[4])
+    a = hit
+    while a > 0 and hit - a < 50 and not ends(words[a - 1]):
+        a -= 1
+    b = hit
+    while b < len(words) - 1 and b - hit < 50 and not ends(words[b]):
+        b += 1
+    text = " ".join(w[4] for w in words[a:b + 1])
+    return re.sub(r"(\w)- (\w)", r"\1\2", text).strip()  # "mono- semantic" -> "monosemantic"
