@@ -16,7 +16,7 @@
 
 ## Install
 
-**Download** [interpretability-0.2.0-arm64.dmg](https://github.com/xinhaoc/interpretability/releases/download/v0.2.0/interpretability-0.2.0-arm64.dmg) (Apple Silicon Mac, macOS 13+). Nothing else to install.
+**Download** [interpretability-0.2.1-arm64.dmg](https://github.com/xinhaoc/interpretability/releases/download/v0.2.1/interpretability-0.2.1-arm64.dmg) (Apple Silicon Mac, macOS 13+). Nothing else to install.
 
 1. Open the DMG and drag **interpretability** into Applications.
 2. The app is not notarized by Apple, so macOS blocks the first launch. Open **System Settings → Privacy & Security**, scroll down and click **Open Anyway**. Or run once in Terminal:

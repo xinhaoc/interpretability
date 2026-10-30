@@ -1845,6 +1845,49 @@ function wireFind() {
   window.openFind = openFind; // the macOS menu (编辑 → 查找) calls this
 }
 
+// --------------------------------------------------------------------------- text selection
+
+// While you select, an invisible layer covering the page (.endOfContent) catches the mouse in
+// the gaps between lines, beside equations and between columns. If that layer sat at the end of
+// the text, WebKit would extend the selection to the end of the page whenever the mouse crossed
+// a gap. So, like pdf.js, keep it in the DOM right after the end of the selection that is moving:
+// over a gap the selection then stays where it is.
+function wireTextSelection() {
+  let down = false, prev = null;
+  const reset = (tl) => {
+    const end = tl.querySelector(".endOfContent");
+    if (end) { tl.append(end); end.style.width = end.style.height = ""; }
+    tl.classList.remove("selecting");
+  };
+  const resetAll = () => { $$(".textLayer.selecting").forEach(reset); prev = null; };
+  document.addEventListener("pointerdown", () => (down = true));
+  document.addEventListener("pointerup", () => { down = false; resetAll(); });
+  window.addEventListener("blur", () => { down = false; resetAll(); });
+  document.addEventListener("keyup", () => { if (!down) resetAll(); });
+  document.addEventListener("selectionchange", () => {
+    const sel = document.getSelection();
+    if (!sel.rangeCount) return resetAll();
+    const range = sel.getRangeAt(0);
+    for (const tl of $$(".textLayer")) {
+      if (range.intersectsNode(tl)) tl.classList.add("selecting");
+      else if (tl.classList.contains("selecting")) reset(tl);
+    }
+    // Which end is moving: the start if the end stayed put since the last change.
+    const modifyStart = prev && (range.compareBoundaryPoints(Range.END_TO_END, prev) === 0 ||
+                                 range.compareBoundaryPoints(Range.START_TO_END, prev) === 0);
+    let anchor = modifyStart ? range.startContainer : range.endContainer;
+    if (anchor.nodeType === Node.TEXT_NODE) anchor = anchor.parentNode;
+    const tl = anchor.parentElement?.closest(".textLayer");
+    const end = tl?.querySelector(".endOfContent");
+    if (end && anchor !== end) {
+      end.style.width = tl.clientWidth + "px"; // it may land inside a zero-size markedContent span
+      end.style.height = tl.clientHeight + "px";
+      anchor.parentElement.insertBefore(end, modifyStart ? anchor : anchor.nextSibling);
+    }
+    prev = range.cloneRange();
+  });
+}
+
 // --------------------------------------------------------------------------- copy
 
 // Selecting text in the paper moves the focus to the question box in the popup, so the
@@ -2147,6 +2190,7 @@ function wire() {
   wireLinks();
   wireFind();
   wireVocab();
+  wireTextSelection();
   document.addEventListener("copy", onCopyEvent);
   mm = initMindmap({ state, api, h, $, toast, renderCrop, jumpTo, ask, readSSE });
   $("#toggle-lib").onclick = () => document.body.classList.toggle("lib-hidden");
